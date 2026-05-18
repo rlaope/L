@@ -144,8 +144,9 @@ async def collect_history(msg: discord.Message) -> list[dict]:
                 and messages[-1]["role"] == "user"
                 and m.author.id == last_author_id
             ):
-                # 같은 사용자 연속 → prefix 없이 본문만 줄바꿈으로 이어붙임
-                messages[-1]["content"] += "\n" + content
+                # 같은 사용자 연속 → 공백으로 한 문장처럼 이어붙임
+                # (Discord에서 엔터로 분리해 보내는 건 보통 한 문장을 끊어 친 것)
+                messages[-1]["content"] += " " + content
             else:
                 messages.append({"role": "user", "content": f"[{display}] {content}"})
             last_author_id = m.author.id
