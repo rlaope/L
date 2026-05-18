@@ -126,21 +126,29 @@ async def collect_history(msg: discord.Message) -> list[dict]:
 
     bot_id = client.user.id if client.user else 0
     messages: list[dict] = []
+    last_author_id: int | None = None
     for m in chain:
         content = strip_mention(m.content, bot_id) if client.user else m.content
         if not content:
             continue
         if m.author.id == bot_id:
-            role = "assistant"
-            line = content
+            if messages and messages[-1]["role"] == "assistant":
+                messages[-1]["content"] += "\n" + content
+            else:
+                messages.append({"role": "assistant", "content": content})
+            last_author_id = bot_id
         else:
-            role = "user"
             display = getattr(m.author, "display_name", None) or m.author.name
-            line = f"[{display}] {content}"
-        if messages and messages[-1]["role"] == role:
-            messages[-1]["content"] += "\n" + line
-        else:
-            messages.append({"role": role, "content": line})
+            if (
+                messages
+                and messages[-1]["role"] == "user"
+                and m.author.id == last_author_id
+            ):
+                # 같은 사용자 연속 → prefix 없이 본문만 줄바꿈으로 이어붙임
+                messages[-1]["content"] += "\n" + content
+            else:
+                messages.append({"role": "user", "content": f"[{display}] {content}"})
+            last_author_id = m.author.id
 
     if not messages or messages[0]["role"] != "user":
         messages.insert(0, {"role": "user", "content": "(빈 메시지)"})
@@ -298,7 +306,13 @@ async def _process_message(msg: discord.Message, key: tuple[int, int]):
             return
 
         history = await collect_history(msg)
-        log.info("EVENT history msgs=%d", len(history))
+        target_name = getattr(msg.author, "display_name", None) or msg.author.name
+        if history and history[-1]["role"] == "user":
+            history[-1] = {
+                "role": "user",
+                "content": history[-1]["content"] + f"\n\n(이 메시지에 답하세요. 답변 대상: {target_name})",
+            }
+        log.info("EVENT history msgs=%d target=%s", len(history), target_name)
 
         async with msg.channel.typing():
             try:
