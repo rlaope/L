@@ -6,3 +6,4 @@ __pycache__/
 _usage.json
 _announce.py
 .omc/
+bot.log
