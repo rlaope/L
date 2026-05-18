@@ -23,8 +23,10 @@ HISTORY_LIMIT = 10
 DISCORD_MSG_LIMIT = 2000
 CONTINUATION_WINDOW_SEC = 90
 DEBOUNCE_SEC = 1.5
+ACTIVE_WINDOW_SEC = 8
 
 pending_responses: dict[tuple[int, int], "asyncio.Task"] = {}
+active_until: dict[tuple[int, int], float] = {}
 
 NAME_PATTERN = re.compile(r"(?:^|[^가-힣ㄱ-ㅎㅏ-ㅣ])엘(?:[^가-힣ㄱ-ㅎㅏ-ㅣ]|$)")
 USAGE_PATTERN = re.compile(r"(?:^|\s)/usage\b")
@@ -198,6 +200,9 @@ async def should_respond(msg: discord.Message) -> bool:
         return True
     if NAME_PATTERN.search(msg.content):
         return True
+    key = (msg.channel.id, msg.author.id)
+    if active_until.get(key, 0) > msg.created_at.timestamp():
+        return True
     ref = msg.reference
     if ref and ref.message_id:
         try:
@@ -253,6 +258,8 @@ async def on_message(msg: discord.Message):
         return
 
     key = (msg.channel.id, msg.author.id)
+    active_until[key] = msg.created_at.timestamp() + ACTIVE_WINDOW_SEC
+
     prev = pending_responses.get(key)
     if prev and not prev.done():
         prev.cancel()
