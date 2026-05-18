@@ -17,11 +17,14 @@ load_dotenv()
 DISCORD_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 HISTORY_LIMIT = 10
 DISCORD_MSG_LIMIT = 2000
 CONTINUATION_WINDOW_SEC = 90
+DEBOUNCE_SEC = 1.5
+
+pending_responses: dict[tuple[int, int], "asyncio.Task"] = {}
 
 NAME_PATTERN = re.compile(r"(?:^|[^가-힣ㄱ-ㅎㅏ-ㅣ])엘(?:[^가-힣ㄱ-ㅎㅏ-ㅣ]|$)")
 USAGE_PATTERN = re.compile(r"(?:^|\s)/usage\b")
@@ -249,59 +252,75 @@ async def on_message(msg: discord.Message):
     if not await should_respond(msg):
         return
 
-    bot_id = client.user.id if client.user else 0
-    stripped = strip_mention(msg.content, bot_id)
-    ch_name = getattr(msg.channel, "name", "DM")
-    preview = msg.content.replace("\n", " ")[:60]
-    log.info("EVENT trigger user=%s ch=%s text=%r", msg.author, ch_name, preview)
+    key = (msg.channel.id, msg.author.id)
+    prev = pending_responses.get(key)
+    if prev and not prev.done():
+        prev.cancel()
+        log.info("EVENT debounce_supersede user=%s", msg.author)
+
+    pending_responses[key] = asyncio.create_task(_process_message(msg, key))
+
+
+async def _process_message(msg: discord.Message, key: tuple[int, int]):
+    try:
+        await asyncio.sleep(DEBOUNCE_SEC)
+    except asyncio.CancelledError:
+        return
 
     try:
-        await msg.add_reaction("👀")
-    except (discord.Forbidden, discord.HTTPException):
-        pass
+        bot_id = client.user.id if client.user else 0
+        stripped = strip_mention(msg.content, bot_id)
+        ch_name = getattr(msg.channel, "name", "DM")
+        preview = msg.content.replace("\n", " ")[:60]
+        log.info("EVENT trigger user=%s ch=%s text=%r", msg.author, ch_name, preview)
 
-    if client.user in msg.mentions and "챱" in stripped:
-        log.info("EVENT chap_trigger")
-        try:
-            await msg.channel.send(file=discord.File(str(CHAP_PATH)))
-        except FileNotFoundError:
-            await msg.channel.send("...챱이 사라졌습니다.")
-        except discord.HTTPException:
-            log.exception("EVENT chap_send_fail")
-            await msg.channel.send("...챱을 보내려다 실패했습니다.")
-        return
-
-    if USAGE_PATTERN.search(stripped):
-        log.info("EVENT usage_query")
-        await msg.channel.send(format_usage())
-        return
-
-    history = await collect_history(msg)
-    log.info("EVENT history msgs=%d", len(history))
-
-    async with msg.channel.typing():
-        try:
-            response = await call_claude(history)
-        except (APIStatusError, APIError):
-            log.exception("EVENT api_error")
-            await msg.channel.send("...엘이 잠시 사고가 멈춘 모양입니다. 다시 불러주세요.")
+        if client.user in msg.mentions and "챱" in stripped:
+            log.info("EVENT chap_trigger")
+            try:
+                await msg.channel.send(file=discord.File(str(CHAP_PATH)))
+            except FileNotFoundError:
+                await msg.channel.send("...챱이 사라졌습니다.")
+            except discord.HTTPException:
+                log.exception("EVENT chap_send_fail")
+                await msg.channel.send("...챱을 보내려다 실패했습니다.")
             return
 
-    record_usage(response.usage)
-    log.info("EVENT response in=%d out=%d stop=%s",
-             getattr(response.usage, "input_tokens", 0),
-             getattr(response.usage, "output_tokens", 0),
-             response.stop_reason)
+        if USAGE_PATTERN.search(stripped):
+            log.info("EVENT usage_query")
+            await msg.channel.send(format_usage())
+            return
 
-    text = extract_text(response)
-    if not text:
-        log.info("EVENT empty_text")
-        await msg.channel.send("...(엘이 잠시 생각에 잠겼습니다.)")
+        history = await collect_history(msg)
+        log.info("EVENT history msgs=%d", len(history))
+
+        async with msg.channel.typing():
+            try:
+                response = await call_claude(history)
+            except (APIStatusError, APIError):
+                log.exception("EVENT api_error")
+                await msg.channel.send("...엘이 잠시 사고가 멈춘 모양입니다. 다시 불러주세요.")
+                return
+
+        record_usage(response.usage)
+        log.info("EVENT response in=%d out=%d stop=%s",
+                 getattr(response.usage, "input_tokens", 0),
+                 getattr(response.usage, "output_tokens", 0),
+                 response.stop_reason)
+
+        text = extract_text(response)
+        if not text:
+            log.info("EVENT empty_text")
+            await msg.channel.send("...(엘이 잠시 생각에 잠겼습니다.)")
+            return
+
+        for chunk in split_for_discord(text):
+            await msg.channel.send(chunk)
+        log.info("EVENT sent chunks=%d chars=%d", len(split_for_discord(text)), len(text))
+    except asyncio.CancelledError:
         return
-
-    for chunk in split_for_discord(text):
-        await msg.channel.send(chunk)
-    log.info("EVENT sent chunks=%d chars=%d", len(split_for_discord(text)), len(text))
+    finally:
+        if pending_responses.get(key) is asyncio.current_task():
+            pending_responses.pop(key, None)
 
 
 if __name__ == "__main__":
